@@ -1,6 +1,6 @@
 use cosmwasm_std::{
-    to_binary, Api, Binary, CanonicalAddr, Env, Extern, HandleResponse, HumanAddr, InitResponse,
-    Querier, StdError, StdResult, Storage,
+    log, to_binary, Api, BankMsg, Binary, CanonicalAddr, CosmosMsg, Env, Extern, HandleResponse,
+    HumanAddr, InitResponse, Querier, StdError, StdResult, Storage, Uint128,
 };
 
 use crate::msg::{HandleMsg, InitMsg, QueryMsg, ReceiverResponse};
@@ -39,9 +39,34 @@ pub fn handle<S: Storage, A: Api, Q: Querier>(
 
 pub fn try_tokensend<S: Storage, A: Api, Q: Querier>(
     deps: &mut Extern<S, A, Q>,
-    _env: Env,
+    env: Env,
 ) -> StdResult<HandleResponse> {
-    Ok(HandleResponse::default())
+    let funds = env.message.sent_funds;
+    if funds
+        .clone()
+        .into_iter()
+        .find(|x| x.denom == "uusd" && x.amount > Uint128(0))
+        .is_none()
+    {
+        return Err(StdError::generic_err("You must pass some UST"));
+    }
+
+    let state = config_read(&deps.storage).load()?;
+    let recipient = deps.api.human_address(&state.receiver)?;
+    let log = vec![log("action", "send"), log("recipient", recipient.as_str())];
+    let from_address = env.contract.address.clone();
+    let to_address = recipient.clone();
+
+    let r = HandleResponse {
+        messages: vec![CosmosMsg::Bank(BankMsg::Send {
+            from_address,
+            to_address,
+            amount: funds,
+        })],
+        log,
+        data: None,
+    };
+    Ok(r)
 }
 
 pub fn try_reset<S: Storage, A: Api, Q: Querier>(
@@ -91,7 +116,7 @@ mod tests {
         let msg = InitMsg {
             receiver: "terra1j40dd3k6f3wmlx8h00eg5avasjygvsh3pg3g5p".to_string(),
         };
-        let env = mock_env("creator", &coins(1000, "ust"));
+        let env = mock_env("creator", &coins(1000, "uusd"));
 
         // we can just call .unwrap() to assert this was a success
         let res = init(&mut deps, env, msg).unwrap();
@@ -107,19 +132,64 @@ mod tests {
     }
 
     #[test]
-    fn tokensend() {
+    fn failed_tokensend() {
         let mut deps = mock_dependencies(44, &coins(2, "token"));
 
         let msg = InitMsg {
             receiver: "terra1w548z72h5mgf6cgdkrx5h7fqk3e5wdejkv22d5".to_string(),
         };
-        let env = mock_env("creator", &coins(2, "token"));
+        let env = mock_env("creator", &coins(1000, "token"));
+
         let _res = init(&mut deps, env, msg).unwrap();
 
-        // beneficiary can release it
-        let env = mock_env("anyone", &coins(2, "token"));
+        let env = mock_env("anyone", &[]);
         let msg = HandleMsg::TokenSend {};
-        let _res = handle(&mut deps, env, msg).unwrap();
+        let res = handle(&mut deps, env, msg);
+        match res {
+            Ok(_) => panic!("expected error"),
+            Err(StdError::GenericErr { msg, .. }) => {
+                assert_eq!(msg, "You must pass some UST")
+            }
+            Err(e) => panic!("unexpected error: {:?}", e),
+        }
+    }
+
+    #[test]
+    fn tokensend() {
+        let mut deps = mock_dependencies(44, &coins(2, "uusd"));
+
+        let msg = InitMsg {
+            receiver: "terra1w548z72h5mgf6cgdkrx5h7fqk3e5wdejkv22d5".to_string(),
+        };
+        let env = mock_env("creator", &coins(1000, "uusd"));
+
+        let _res = init(&mut deps, env, msg).unwrap();
+
+        let balance = coins(100, "uusd");
+        let env = mock_env("anyone", &balance);
+        let msg = HandleMsg::TokenSend {};
+
+        //deps.querier.update_balance("anyone", coins(200, "token"));
+        //let query_balance = deps.querier.query_all_balances("anyone");
+        //println!("Balance {:#?}", query_balance);
+
+        let res = handle(&mut deps, env, msg).unwrap();
+        let msg = res.messages.get(0).expect("no message");
+        assert_eq!(
+            msg,
+            &CosmosMsg::Bank(BankMsg::Send {
+                from_address: HumanAddr::from("cosmos2contract"),
+                to_address: HumanAddr::from("terra1w548z72h5mgf6cgdkrx5h7fqk3e5wdejkv22d5"),
+                amount: coins(100, "uusd"),
+            })
+        );
+        assert_eq!(
+            res.log,
+            vec![
+                log("action", "send"),
+                log("recipient", "terra1w548z72h5mgf6cgdkrx5h7fqk3e5wdejkv22d5"),
+            ]
+        );
     }
 
     #[test]
