@@ -8,7 +8,7 @@ pub static CONFIG_KEY: &[u8] = b"config";
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 pub struct State {
-    pub count: i32,
+    pub receiver: CanonicalAddr,
     pub owner: CanonicalAddr,
 }
 
